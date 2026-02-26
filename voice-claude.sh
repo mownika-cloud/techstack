@@ -37,9 +37,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Transcribe
+# Transcribe — write to a temp file so stdin stays connected to the terminal
+TMPFILE="$(mktemp /tmp/voice-claude-XXXXXX.txt)"
+trap 'rm -f "$TMPFILE"' EXIT
+
 # shellcheck disable=SC2086
-TRANSCRIPT="$(python3 "$TRANSCRIBE_PY" -m "$MODEL" $DURATION_FLAG $FILE_FLAG)"
+python3 "$TRANSCRIBE_PY" -m "$MODEL" $DURATION_FLAG $FILE_FLAG > "$TMPFILE" </dev/tty
+TRANSCRIPT="$(cat "$TMPFILE")"
 
 if [[ -z "$TRANSCRIPT" ]]; then
   echo "No transcription produced. Exiting." >&2
