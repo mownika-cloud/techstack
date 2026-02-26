@@ -22,6 +22,34 @@ import whisper
 SAMPLE_RATE = 16000  # Whisper expects 16kHz
 
 
+def has_input_device() -> bool:
+    """Return True if at least one audio input device is available."""
+    try:
+        devices = sd.query_devices()
+        if not devices:
+            return False
+        # query_devices() returns a dict for a single device, list for multiple
+        if isinstance(devices, dict):
+            devices = [devices]
+        return any(d.get("max_input_channels", 0) > 0 for d in devices)
+    except Exception:
+        return False
+
+
+def prompt_text_fallback() -> str:
+    """Prompt the user to type their prompt when no mic is available."""
+    print("No microphone detected — falling back to text input.", file=sys.stderr)
+    print("Type your prompt below (Enter to finish, Ctrl+C to cancel):", file=sys.stderr)
+    try:
+        sys.stderr.write("> ")
+        sys.stderr.flush()
+        text = sys.stdin.readline().strip()
+    except KeyboardInterrupt:
+        print("\nCancelled.", file=sys.stderr)
+        sys.exit(0)
+    return text
+
+
 def record_audio(duration: int | None = None, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
     """Record audio from the default microphone.
 
@@ -64,6 +92,57 @@ def record_audio(duration: int | None = None, sample_rate: int = SAMPLE_RATE) ->
         return np.concatenate(frames).flatten()
 
 
+def record_with_options(duration: int | None, model_name: str, output: str | None) -> str:
+    """Record audio, then ask: [S]end / [R]e-record / [C]ancel. Returns transcript."""
+    while True:
+        audio = record_audio(duration=duration)
+
+        if audio.size == 0:
+            print("No audio captured.", file=sys.stderr)
+        else:
+            # Save and transcribe
+            if output:
+                audio_path = output
+                sf.write(audio_path, audio, SAMPLE_RATE)
+                print(f"Audio saved to {audio_path}", file=sys.stderr)
+                text = transcribe_audio(audio_path, model_name=model_name)
+            else:
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                    audio_path = tmp.name
+                try:
+                    sf.write(audio_path, audio, SAMPLE_RATE)
+                    text = transcribe_audio(audio_path, model_name=model_name)
+                finally:
+                    os.unlink(audio_path)
+
+            if text:
+                print(f"\nTranscribed: {text}", file=sys.stderr)
+
+        print("\nWhat would you like to do?", file=sys.stderr)
+        print("  [S] Send this transcription", file=sys.stderr)
+        print("  [R] Re-record", file=sys.stderr)
+        print("  [C] Cancel", file=sys.stderr)
+        try:
+            sys.stderr.write("Choice [S/R/C]: ")
+            sys.stderr.flush()
+            choice = sys.stdin.readline().strip().lower()
+        except KeyboardInterrupt:
+            print("\nCancelled.", file=sys.stderr)
+            sys.exit(0)
+
+        if choice in ("s", ""):
+            if audio.size == 0 or not text:
+                print("Nothing to send — please re-record.", file=sys.stderr)
+                continue
+            return text
+        elif choice == "r":
+            print("", file=sys.stderr)
+            continue
+        else:
+            print("Cancelled.", file=sys.stderr)
+            sys.exit(0)
+
+
 def transcribe_audio(audio_path: str, model_name: str = "base") -> str:
     """Load Whisper model and transcribe the given audio file."""
     print(f"Loading Whisper '{model_name}' model...", file=sys.stderr)
@@ -97,28 +176,21 @@ def main():
     args = parser.parse_args()
 
     if args.file:
-        audio_path = args.file
-        text = transcribe_audio(audio_path, model_name=args.model)
+        text = transcribe_audio(args.file, model_name=args.model)
+    elif not has_input_device():
+        # No mic available — fall back to typed input
+        text = prompt_text_fallback()
     else:
-        audio = record_audio(duration=args.duration)
-        if audio.size == 0:
-            print("No audio recorded.", file=sys.stderr)
-            sys.exit(1)
+        # Mic available — record with interactive Send/Re-record/Cancel prompt
+        text = record_with_options(
+            duration=args.duration,
+            model_name=args.model,
+            output=args.output,
+        )
 
-        # Save to a temp file (or user-specified file)
-        if args.output:
-            audio_path = args.output
-            sf.write(audio_path, audio, SAMPLE_RATE)
-            print(f"Audio saved to {audio_path}", file=sys.stderr)
-            text = transcribe_audio(audio_path, model_name=args.model)
-        else:
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                audio_path = tmp.name
-            try:
-                sf.write(audio_path, audio, SAMPLE_RATE)
-                text = transcribe_audio(audio_path, model_name=args.model)
-            finally:
-                os.unlink(audio_path)
+    if not text:
+        print("No text produced.", file=sys.stderr)
+        sys.exit(1)
 
     print(text)
 
